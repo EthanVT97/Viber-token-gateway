@@ -1,3 +1,4 @@
+// Viber Token Gateway - Full Version
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
@@ -11,13 +12,18 @@ const crypto = require("crypto");
 
 const app = express();
 
-// 1. Enhanced Security Configurations
+// Welcome Page
+app.get('/', (req, res) => {
+  res.send('Viber Token Gateway is running.');
+});
+
+// Security Config
 app.use(helmet());
 app.use(express.json({ limit: "10kb" }));
 app.use(express.urlencoded({ extended: true, limit: "10kb" }));
 app.set("trust proxy", 1);
 
-// 2. Secure Static File Serving
+// Static Files with Restrictions
 app.use("/", express.static(path.join(__dirname, "public"), {
   extensions: ["html"],
   index: false,
@@ -29,25 +35,22 @@ app.use("/", express.static(path.join(__dirname, "public"), {
   }
 }));
 
-// 3. Rate Limiting with Enhanced Config
+// Rate Limiting
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 100,
   message: { error: "Too many requests, please try again later." },
-  skip: (req) => req.ip === "127.0.0.1" // Skip for localhost
+  skip: (req) => req.ip === "127.0.0.1"
 });
-
 app.use(apiLimiter);
 
-// 4. Dynamic Token Reloading System
+// Load Token Map with Cache
 let tokenMapCache = null;
 let lastTokenMapModified = null;
-
 function loadTokenMap() {
   const tokenPath = path.join(__dirname, "tokens.json");
   try {
     const stats = fs.statSync(tokenPath);
-    
     if (!tokenMapCache || stats.mtimeMs !== lastTokenMapModified) {
       const raw = fs.readFileSync(tokenPath, "utf8");
       tokenMapCache = JSON.parse(raw);
@@ -61,31 +64,22 @@ function loadTokenMap() {
   }
 }
 
-// 5. Enhanced Logging System
+// Logging
 const logDir = path.join(__dirname, "logs");
 if (!fs.existsSync(logDir)) fs.mkdirSync(logDir);
-
-const accessLogStream = fs.createWriteStream(
-  path.join(logDir, "access.log"), 
-  { flags: "a" }
-);
-app.use(morgan("combined", { stream: accessLogStream }));
-
-const requestLogStream = fs.createWriteStream(
-  path.join(logDir, "requests.log"),
-  { flags: "a" }
-);
-
+app.use(morgan("combined", {
+  stream: fs.createWriteStream(path.join(logDir, "access.log"), { flags: "a" })
+}));
+const requestLogStream = fs.createWriteStream(path.join(logDir, "requests.log"), { flags: "a" });
 function logRequest(entry) {
-  const logLine = JSON.stringify({
+  requestLogStream.write(JSON.stringify({
     ...entry,
     timestamp: new Date().toISOString(),
     logId: crypto.randomBytes(4).toString("hex")
-  }) + "\n";
-  requestLogStream.write(logLine);
+  }) + "\n");
 }
 
-// 6. Viber API Proxy Function with Retry Logic
+// Viber Proxy with Retry
 async function forwardViberAPI(realToken, endpoint, body = {}, retries = 3) {
   try {
     const viberRes = await axios.post(
@@ -109,9 +103,9 @@ async function forwardViberAPI(realToken, endpoint, body = {}, retries = 3) {
   }
 }
 
-// 7. Admin Authentication with Enhanced Security
+// Admin Auth
 app.use("/admin", basicAuth({
-  users: { 
+  users: {
     [process.env.ADMIN_USERNAME || "admin"]: process.env.ADMIN_PASSWORD || crypto.randomBytes(8).toString("hex")
   },
   challenge: true,
@@ -119,12 +113,12 @@ app.use("/admin", basicAuth({
   authorizeAsync: true,
   authorizer: (username, password, cb) => {
     const userMatches = basicAuth.safeCompare(username, process.env.ADMIN_USERNAME || "admin");
-    const passwordMatches = basicAuth.safeCompare(password, process.env.ADMIN_PASSWORD || "");
-    cb(null, userMatches && passwordMatches);
+    const passMatches = basicAuth.safeCompare(password, process.env.ADMIN_PASSWORD || "");
+    cb(null, userMatches && passMatches);
   }
 }));
 
-// 8. Health Check Endpoint
+// Health Check
 app.get("/healthz", (req, res) => {
   res.json({
     status: "ok",
@@ -133,9 +127,8 @@ app.get("/healthz", (req, res) => {
   });
 });
 
-// 9. Viber Proxy Endpoints with Enhanced Error Handling
-const viberEndpoints = ["send_message", "get_info", "transfer_owner", "add_member"];
-viberEndpoints.forEach((endpoint) => {
+// Viber Proxy Endpoints
+["send_message", "get_info", "transfer_owner", "add_member"].forEach(endpoint => {
   app.post(`/viber/${endpoint}`, async (req, res) => {
     const fakeToken = req.headers["x-fake-token"];
     if (!fakeToken) return res.status(401).json({ error: "Missing X-Fake-Token header" });
@@ -146,28 +139,25 @@ viberEndpoints.forEach((endpoint) => {
 
     try {
       const viberRes = await forwardViberAPI(profile.real_token, endpoint, req.body);
-      
       logRequest({
         type: "viber_api",
         ip: req.ip,
-        fakeToken: fakeToken,
+        fakeToken,
         endpoint: `/viber/${endpoint}`,
         status: viberRes.status,
         response: viberRes.data
       });
-
       res.status(viberRes.status).json(viberRes.data);
     } catch (err) {
       const errorData = {
         type: "viber_api_error",
         ip: req.ip,
-        fakeToken: fakeToken,
+        fakeToken,
         endpoint: `/viber/${endpoint}`,
         error: err.message,
         status: err.response?.status || 500,
         response: err.response?.data
       };
-
       logRequest(errorData);
       res.status(errorData.status).json({
         error: "Viber API Error",
@@ -178,9 +168,8 @@ viberEndpoints.forEach((endpoint) => {
   });
 });
 
-// 10. Enhanced Fake Bot Management
+// Fake Bot Info Management
 const fakeBotFile = path.join(__dirname, "fake_bots.json");
-
 function loadFakeBots() {
   try {
     if (!fs.existsSync(fakeBotFile)) return {};
@@ -190,7 +179,6 @@ function loadFakeBots() {
     return {};
   }
 }
-
 function saveFakeBots(data) {
   fs.writeFileSync(fakeBotFile, JSON.stringify(data, null, 2), "utf8");
 }
@@ -198,34 +186,22 @@ function saveFakeBots(data) {
 app.get("/viber/fake_info", (req, res) => {
   const fakeToken = req.headers["x-fake-token"];
   if (!fakeToken) return res.status(400).json({ error: "Missing fake token" });
-
-  try {
-    const info = loadFakeBots()[fakeToken];
-    if (!info) return res.status(404).json({ error: "No fake bot info found" });
-
-    res.json({ status: "ok", info });
-  } catch (e) {
-    res.status(500).json({ error: "Failed to read fake bot info" });
-  }
+  const info = loadFakeBots()[fakeToken];
+  if (!info) return res.status(404).json({ error: "No fake bot info found" });
+  res.json({ status: "ok", info });
 });
 
 app.post("/viber/fake_info", (req, res) => {
   const fakeToken = req.headers["x-fake-token"];
   const { name, uri, icon, background } = req.body;
   if (!fakeToken) return res.status(400).json({ error: "Missing fake token" });
-
-  try {
-    const data = loadFakeBots();
-    data[fakeToken] = { name, uri, icon, background, updatedAt: new Date().toISOString() };
-    saveFakeBots(data);
-
-    res.json({ status: "ok", message: "Fake bot info updated" });
-  } catch (e) {
-    res.status(500).json({ error: "Failed to update fake bot info" });
-  }
+  const data = loadFakeBots();
+  data[fakeToken] = { name, uri, icon, background, updatedAt: new Date().toISOString() };
+  saveFakeBots(data);
+  res.json({ status: "ok", message: "Fake bot info updated" });
 });
 
-// 11. Enhanced Admin API Endpoints
+// Admin APIs
 app.get("/admin/api/token-map", (req, res) => {
   res.json(loadTokenMap());
 });
@@ -233,24 +209,18 @@ app.get("/admin/api/token-map", (req, res) => {
 app.get("/admin/api/logs", (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 100, 1000);
   const searchToken = req.query.token;
-
   try {
-    const logData = fs.readFileSync(path.join(logDir, "requests.log"), "utf8");
-    let logs = logData.trim().split("\n").reverse();
-
+    let logs = fs.readFileSync(path.join(logDir, "requests.log"), "utf8").trim().split("\n").reverse();
     if (searchToken) {
       logs = logs.filter(line => line.includes(`"fakeToken":"${searchToken}"`));
     }
-
-    const parsedLogs = logs.slice(0, limit).map(line => {
+    res.json(logs.slice(0, limit).map(line => {
       try {
         return JSON.parse(line);
       } catch {
         return { error: "Invalid log line" };
       }
-    });
-
-    res.json(parsedLogs);
+    }));
   } catch (err) {
     res.status(500).json({ error: "Failed to read logs" });
   }
@@ -261,30 +231,23 @@ app.post("/admin/api/add-token", (req, res) => {
   if (!fakeToken || !real_token || !uri) {
     return res.status(400).json({ error: "Missing parameters" });
   }
-
   try {
     const map = loadTokenMap();
-    map[fakeToken] = { 
-      real_token, 
+    map[fakeToken] = {
+      real_token,
       uri,
       createdAt: new Date().toISOString(),
       lastUsed: null
     };
-    
-    fs.writeFileSync(
-      path.join(__dirname, "tokens.json"),
-      JSON.stringify(map, null, 2),
-      "utf8"
-    );
-    
-    tokenMapCache = null; // Clear cache
+    fs.writeFileSync(path.join(__dirname, "tokens.json"), JSON.stringify(map, null, 2), "utf8");
+    tokenMapCache = null;
     res.json({ status: "ok", message: "Token added" });
   } catch (e) {
     res.status(500).json({ error: "Failed to write token map" });
   }
 });
 
-// 12. Error Handling Middleware
+// Global Error Handler
 app.use((err, req, res, next) => {
   console.error(err.stack);
   logRequest({
@@ -295,10 +258,11 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: "Internal Server Error" });
 });
 
-// Start the server
+// Start Server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Viber Token Gateway running on port ${PORT}`);
   console.log(`Admin panel: http://localhost:${PORT}/admin`);
   console.log(`Health check: http://localhost:${PORT}/healthz`);
 });
+                                      
