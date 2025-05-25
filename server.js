@@ -9,18 +9,21 @@ const path = require("path");
 const app = express();
 app.use(express.json());
 
-// Root route for test
+// IMPORTANT: Reverse proxy အောက်မှာ IP ကိုတိတိကျကျ ဖော်ထုတ်ဖို့
+app.set("trust proxy", 1);
+
+// Root route for health check / test
 app.get("/", (req, res) => {
   res.send("Viber Token Gateway is running. Use /viber/send_message API.");
 });
 
-// Token map from env
+// Token map from environment variables
 const tokenMap = {
   "FAKE_TOKEN_555": process.env.TOKEN_FAKE_TOKEN_555,
   "FAKE_TEST_123": process.env.TOKEN_FAKE_TEST_123,
 };
 
-// Rate limiter
+// Rate limiter setup (30 requests per minute per IP)
 const limiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
   max: 30,
@@ -28,11 +31,12 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// Log setup
+// Setup log directory and file
 const logDir = path.join(__dirname, "logs");
 if (!fs.existsSync(logDir)) fs.mkdirSync(logDir);
 const logFile = path.join(logDir, "requests.log");
 
+// Function to append log entries to file
 function logRequest(entry) {
   const logLine = JSON.stringify(entry) + "\n";
   fs.appendFile(logFile, logLine, (err) => {
@@ -40,13 +44,14 @@ function logRequest(entry) {
   });
 }
 
-// Main API
+// Main proxy API endpoint
 app.post("/viber/send_message", async (req, res) => {
   const fakeToken = req.headers["x-fake-token"];
   const realToken = tokenMap[fakeToken];
 
   if (!realToken) return res.status(403).json({ error: "Invalid token" });
 
+  // Log request info
   logRequest({
     timestamp: new Date().toISOString(),
     ip: req.ip,
@@ -56,6 +61,7 @@ app.post("/viber/send_message", async (req, res) => {
   });
 
   try {
+    // Forward request to Viber API with real token
     const viberRes = await axios.post(
       "https://chatapi.viber.com/pa/send_message",
       req.body,
@@ -72,7 +78,7 @@ app.post("/viber/send_message", async (req, res) => {
   }
 });
 
-// Admin dashboard with basic auth
+// Admin dashboard with basic auth protection
 app.use(
   "/admin",
   basicAuth({
