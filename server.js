@@ -1,9 +1,13 @@
+require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const app = express();
 app.use(express.json());
 
-const tokenMap = require("./token-map.json");
+const tokenMap = {
+  "FAKE_TOKEN_555": process.env.TOKEN_FAKE_TOKEN_555,
+  "FAKE_TEST_123": process.env.TOKEN_FAKE_TEST_123
+};
 
 app.post("/viber/send_message", async (req, res) => {
   const fakeToken = req.headers["x-fake-token"];
