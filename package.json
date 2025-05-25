@@ -1,12 +1,23 @@
 {
   "name": "viber-token-gateway",
   "version": "1.0.0",
+  "description": "A proxy gateway for mapping fake Viber bot tokens to real ones using a secure environment setup.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
+  "keywords": [
+    "viber",
+    "bot",
+    "proxy",
+    "token",
+    "gateway"
+  ],
+  "author": "EthanVT97",
+  "license": "MIT",
   "dependencies": {
     "axios": "^1.6.0",
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "dotenv": "^16.4.5"
   }
 }
