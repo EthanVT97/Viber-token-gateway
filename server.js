@@ -12,7 +12,7 @@ app.set("trust proxy", 1);
 
 // Root route
 app.get("/", (req, res) => {
-  res.send("Viber Token Gateway is running. Use /viber/send_message API.");
+  res.send("Viber Token Gateway is running. Available endpoints: /viber/send_message, /viber/get_info, /viber/transfer_owner, /viber/invite, /viber/add_member");
 });
 
 // Token map
@@ -48,6 +48,8 @@ function getRealToken(req) {
   return { fakeToken, realToken };
 }
 
+// ==================== VIBER API ENDPOINTS ====================
+
 // Send message endpoint
 app.post("/viber/send_message", async (req, res) => {
   const { fakeToken, realToken } = getRealToken(req);
@@ -74,7 +76,11 @@ app.post("/viber/send_message", async (req, res) => {
     );
     res.status(viberRes.status).json(viberRes.data);
   } catch (err) {
-    res.status(500).json({ error: "Viber API Error", detail: err.message });
+    res.status(500).json({ 
+      error: "Viber API Error",
+      detail: err.message,
+      response: err.response?.data 
+    });
   }
 });
 
@@ -97,24 +103,27 @@ app.post("/viber/get_info", async (req, res) => {
       {
         headers: {
           "X-Viber-Auth-Token": realToken,
+          "Content-Type": "application/json",
         },
       }
     );
     res.status(viberRes.status).json(viberRes.data);
   } catch (err) {
-    res.status(500).json({ error: "Viber API Error", detail: err.message });
+    res.status(500).json({ 
+      error: "Viber API Error",
+      detail: err.message,
+      response: err.response?.data 
+    });
   }
 });
 
-// Transfer ownership endpoint
+// Transfer ownership
 app.post("/viber/transfer_owner", async (req, res) => {
   const { fakeToken, realToken } = getRealToken(req);
   if (!realToken) return res.status(403).json({ error: "Invalid token" });
 
   const { from, to } = req.body;
-  if (!from || !to) {
-    return res.status(400).json({ error: "Both 'from' and 'to' user IDs are required" });
-  }
+  if (!from || !to) return res.status(400).json({ error: "Both 'from' and 'to' user IDs are required" });
 
   logRequest({
     timestamp: new Date().toISOString(),
@@ -137,15 +146,95 @@ app.post("/viber/transfer_owner", async (req, res) => {
     );
     res.status(viberRes.status).json(viberRes.data);
   } catch (err) {
-    const errorResponse = {
+    res.status(500).json({ 
       error: "Viber API Error",
       detail: err.message,
-      status: err.response?.status,
-      data: err.response?.data
-    };
-    res.status(500).json(errorResponse);
+      response: err.response?.data 
+    });
   }
 });
+
+// Generate invite link (works for public bots)
+app.post("/viber/invite", async (req, res) => {
+  const { fakeToken, realToken } = getRealToken(req);
+  if (!realToken) return res.status(403).json({ error: "Invalid token" });
+
+  logRequest({
+    timestamp: new Date().toISOString(),
+    ip: req.ip,
+    fakeToken,
+    endpoint: "/viber/invite",
+  });
+
+  try {
+    const viberRes = await axios.post(
+      "https://chatapi.viber.com/pa/get_account_info",
+      {},
+      {
+        headers: {
+          "X-Viber-Auth-Token": realToken,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    
+    const botUri = viberRes.data.uri;
+    if (!botUri) throw new Error("Bot URI not found");
+    
+    res.json({
+      status: 0,
+      deep_link: `viber://pa?chatURI=${botUri}`,
+      web_link: `https://chats.viber.com/${botUri}`,
+      message: "For unpublished bots, admin must manually add members using /viber/add_member"
+    });
+  } catch (err) {
+    res.status(500).json({ 
+      error: "Failed to generate invite link",
+      detail: err.message,
+      response: err.response?.data 
+    });
+  }
+});
+
+// Add member (works for both public and unpublished bots)
+app.post("/viber/add_member", async (req, res) => {
+  const { fakeToken, realToken } = getRealToken(req);
+  if (!realToken) return res.status(403).json({ error: "Invalid token" });
+
+  const { user_id } = req.body;
+  if (!user_id) return res.status(400).json({ error: "user_id is required" });
+
+  logRequest({
+    timestamp: new Date().toISOString(),
+    ip: req.ip,
+    fakeToken,
+    endpoint: "/viber/add_member",
+    body: req.body,
+  });
+
+  try {
+    const viberRes = await axios.post(
+      "https://chatapi.viber.com/pa/add_member",
+      { id: user_id },
+      {
+        headers: {
+          "X-Viber-Auth-Token": realToken,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    res.status(viberRes.status).json(viberRes.data);
+  } catch (err) {
+    res.status(500).json({ 
+      error: "Failed to add member",
+      detail: err.message,
+      response: err.response?.data,
+      note: "Ensure the bot is public or you're an admin adding members manually"
+    });
+  }
+});
+
+// ==================== ADMIN DASHBOARD ====================
 
 // Admin dashboard
 app.use(
