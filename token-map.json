@@ -1,4 +1,27 @@
 {
-  "FAKE_TOKEN_555": "ACTUAL_VIBER_TOKEN_HERE",
-  "FAKE_TEST_123": "REAL_TOKEN_XYZ"
+  "FAKE_TOKEN_555": {
+    "real_token": "REAL_TOKEN_ABC",
+    "fake_uri": "mybot",
+    "real_uri": "jedidesktest"
+  },
+  "FAKE_TEST_123": {
+    "real_token": "REAL_TOKEN_DEF",
+    "fake_uri": "testbot",
+    "real_uri": "realtestbot"
+  },
+  "FAKE_BOT_YGN01": {
+    "real_token": "REAL_TOKEN_XYZ987",
+    "fake_uri": "yangonbot01",
+    "real_uri": "realyangonbot01"
+  },
+  "FAKE_SHOP_BOT": {
+    "real_token": "REAL_TOKEN_SHOP",
+    "fake_uri": "shopassist",
+    "real_uri": "realshopbot"
+  },
+  "FAKE_SUPPORT_BOT": {
+    "real_token": "REAL_TOKEN_SUPPORT",
+    "fake_uri": "supportbot",
+    "real_uri": "customersupport"
+  }
 }
