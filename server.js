@@ -106,32 +106,28 @@ app.post("/viber/get_info", async (req, res) => {
   }
 });
 
-// Transfer ownership
-app.post("/viber/transfer_ownership", async (req, res) => {
+// Transfer ownership endpoint
+app.post("/viber/transfer_owner", async (req, res) => {
   const { fakeToken, realToken } = getRealToken(req);
   if (!realToken) return res.status(403).json({ error: "Invalid token" });
 
-  const { uri, name, avatar, category, subcategory } = req.body;
-  if (!uri) return res.status(400).json({ error: "uri is required" });
+  const { from, to } = req.body;
+  if (!from || !to) {
+    return res.status(400).json({ error: "Both 'from' and 'to' user IDs are required" });
+  }
 
   logRequest({
     timestamp: new Date().toISOString(),
     ip: req.ip,
     fakeToken,
-    endpoint: "/viber/transfer_ownership",
+    endpoint: "/viber/transfer_owner",
     body: req.body,
   });
 
   try {
     const viberRes = await axios.post(
-      "https://chatapi.viber.com/pa/set_webhook",
-      {
-        uri,
-        name,
-        avatar,
-        category,
-        subcategory,
-      },
+      "https://chatapi.viber.com/pa/transfer_account",
+      { from, to },
       {
         headers: {
           "X-Viber-Auth-Token": realToken,
@@ -141,7 +137,13 @@ app.post("/viber/transfer_ownership", async (req, res) => {
     );
     res.status(viberRes.status).json(viberRes.data);
   } catch (err) {
-    res.status(500).json({ error: "Viber API Error", detail: err.message });
+    const errorResponse = {
+      error: "Viber API Error",
+      detail: err.message,
+      status: err.response?.status,
+      data: err.response?.data
+    };
+    res.status(500).json(errorResponse);
   }
 });
 
