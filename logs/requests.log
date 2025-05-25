@@ -1,3 +1,0 @@
-const logDir = path.join(__dirname, "logs");
-if (!fs.existsSync(logDir)) fs.mkdirSync(logDir);
-if (!fs.existsSync(logFile)) fs.writeFileSync(logFile, "");
