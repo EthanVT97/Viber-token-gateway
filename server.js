@@ -8,35 +8,32 @@ const path = require("path");
 
 const app = express();
 app.use(express.json());
-
-// IMPORTANT: Reverse proxy အောက်မှာ IP ကိုတိတိကျကျ ဖော်ထုတ်ဖို့
 app.set("trust proxy", 1);
 
-// Root route for health check / test
+// Root route
 app.get("/", (req, res) => {
   res.send("Viber Token Gateway is running. Use /viber/send_message API.");
 });
 
-// Token map from environment variables
+// Token map
 const tokenMap = {
   "FAKE_TOKEN_555": process.env.TOKEN_FAKE_TOKEN_555,
   "FAKE_TEST_123": process.env.TOKEN_FAKE_TEST_123,
 };
 
-// Rate limiter setup (30 requests per minute per IP)
+// Rate limiter
 const limiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
+  windowMs: 60 * 1000,
   max: 30,
   message: { error: "Too many requests, please try again later." },
 });
 app.use(limiter);
 
-// Setup log directory and file
+// Logs
 const logDir = path.join(__dirname, "logs");
 if (!fs.existsSync(logDir)) fs.mkdirSync(logDir);
 const logFile = path.join(logDir, "requests.log");
 
-// Function to append log entries to file
 function logRequest(entry) {
   const logLine = JSON.stringify(entry) + "\n";
   fs.appendFile(logFile, logLine, (err) => {
@@ -44,14 +41,18 @@ function logRequest(entry) {
   });
 }
 
-// Main proxy API endpoint
-app.post("/viber/send_message", async (req, res) => {
+// Utility: Get real token from fake token
+function getRealToken(req) {
   const fakeToken = req.headers["x-fake-token"];
   const realToken = tokenMap[fakeToken];
+  return { fakeToken, realToken };
+}
 
+// Send message endpoint
+app.post("/viber/send_message", async (req, res) => {
+  const { fakeToken, realToken } = getRealToken(req);
   if (!realToken) return res.status(403).json({ error: "Invalid token" });
 
-  // Log request info
   logRequest({
     timestamp: new Date().toISOString(),
     ip: req.ip,
@@ -61,7 +62,6 @@ app.post("/viber/send_message", async (req, res) => {
   });
 
   try {
-    // Forward request to Viber API with real token
     const viberRes = await axios.post(
       "https://chatapi.viber.com/pa/send_message",
       req.body,
@@ -78,7 +78,74 @@ app.post("/viber/send_message", async (req, res) => {
   }
 });
 
-// Admin dashboard with basic auth protection
+// Get account info
+app.post("/viber/get_info", async (req, res) => {
+  const { fakeToken, realToken } = getRealToken(req);
+  if (!realToken) return res.status(403).json({ error: "Invalid token" });
+
+  logRequest({
+    timestamp: new Date().toISOString(),
+    ip: req.ip,
+    fakeToken,
+    endpoint: "/viber/get_info",
+  });
+
+  try {
+    const viberRes = await axios.post(
+      "https://chatapi.viber.com/pa/get_account_info",
+      {},
+      {
+        headers: {
+          "X-Viber-Auth-Token": realToken,
+        },
+      }
+    );
+    res.status(viberRes.status).json(viberRes.data);
+  } catch (err) {
+    res.status(500).json({ error: "Viber API Error", detail: err.message });
+  }
+});
+
+// Transfer ownership
+app.post("/viber/transfer_ownership", async (req, res) => {
+  const { fakeToken, realToken } = getRealToken(req);
+  if (!realToken) return res.status(403).json({ error: "Invalid token" });
+
+  const { uri, name, avatar, category, subcategory } = req.body;
+  if (!uri) return res.status(400).json({ error: "uri is required" });
+
+  logRequest({
+    timestamp: new Date().toISOString(),
+    ip: req.ip,
+    fakeToken,
+    endpoint: "/viber/transfer_ownership",
+    body: req.body,
+  });
+
+  try {
+    const viberRes = await axios.post(
+      "https://chatapi.viber.com/pa/set_webhook",
+      {
+        uri,
+        name,
+        avatar,
+        category,
+        subcategory,
+      },
+      {
+        headers: {
+          "X-Viber-Auth-Token": realToken,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    res.status(viberRes.status).json(viberRes.data);
+  } catch (err) {
+    res.status(500).json({ error: "Viber API Error", detail: err.message });
+  }
+});
+
+// Admin dashboard
 app.use(
   "/admin",
   basicAuth({
@@ -110,5 +177,6 @@ app.get("/admin", (req, res) => {
   });
 });
 
+// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Gateway running on port ${PORT}`));
