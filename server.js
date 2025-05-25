@@ -8,6 +8,7 @@ const path = require("path");
 
 const app = express();
 app.use(express.json());
+app.use(express.static("public")); // Serve admin dashboard
 app.set("trust proxy", 1);
 
 // Rate limiter
@@ -54,12 +55,11 @@ async function forwardViberAPI(realToken, endpoint, body = {}) {
 
 // Root route
 app.get("/", (req, res) => {
-  res.send("Viber Token Gateway is running. Available endpoints: /viber/send_message, /viber/get_info, /viber/transfer_owner, /viber/invite, /viber/add_member, /viber/fake_info");
+  res.send("Viber Token Gateway is running.");
 });
 
-// Standard Viber endpoints
-const viberEndpoints = ["send_message", "get_info", "transfer_owner", "add_member"];
-viberEndpoints.forEach((endpoint) => {
+// Viber proxy endpoints
+["send_message", "get_info", "transfer_owner", "add_member"].forEach((endpoint) => {
   app.post(`/viber/${endpoint}`, async (req, res) => {
     const profile = getBotProfile(req.headers["x-fake-token"]);
     if (!profile) return res.status(403).json({ error: "Invalid token" });
@@ -99,19 +99,14 @@ app.post("/viber/invite", (req, res) => {
   const profile = getBotProfile(req.headers["x-fake-token"]);
   if (!profile) return res.status(403).json({ error: "Invalid token" });
 
-  try {
-    const uri = profile.fake_uri || profile.uri;
-    const inviteLinks = {
-      status: 0,
-      deep_link: `viber://pa?chatURI=${uri}`,
-      web_link: `https://chats.viber.com/${uri}`,
-      real_uri: profile.uri,
-      message: "For unpublished bots, manually add users using /viber/add_member",
-    };
-    res.json(inviteLinks);
-  } catch (err) {
-    res.status(500).json({ error: "Failed to generate invite link", detail: err.message });
-  }
+  const uri = profile.fake_uri || profile.uri;
+  res.json({
+    status: 0,
+    deep_link: `viber://pa?chatURI=${uri}`,
+    web_link: `https://chats.viber.com/${uri}`,
+    real_uri: profile.uri,
+    message: "For unpublished bots, manually add users using /viber/add_member",
+  });
 });
 
 // Fake bot info GET
@@ -130,7 +125,7 @@ app.get("/viber/fake_info", (req, res) => {
   }
 });
 
-// Fake bot info UPDATE
+// Fake bot info POST
 app.post("/viber/fake_info", (req, res) => {
   const fakeToken = req.headers["x-fake-token"];
   const { name, uri, icon, background } = req.body;
@@ -150,29 +145,65 @@ app.post("/viber/fake_info", (req, res) => {
   }
 });
 
-// Admin Auth
+// Admin authentication
 app.use("/admin", basicAuth({
   users: { [process.env.ADMIN_USERNAME]: process.env.ADMIN_PASSWORD },
   challenge: true,
   unauthorizedResponse: () => "Unauthorized",
 }));
 
-// Admin Dashboard
-app.get("/admin", (req, res) => {
-  fs.readFile(logFile, "utf8", (err, data) => {
-    if (err) return res.status(500).send("Failed to load logs");
+// Admin UI route
+app.get("/admin/ui", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "admin.html"));
+});
 
-    const logs = data.trim().split("\n").map(line => JSON.parse(line)).reverse().slice(0, 50);
-    res.send(`
-      <h1>Admin Dashboard</h1>
-      <h2>Token Map (tokens.json)</h2>
-      <pre>${JSON.stringify(tokenMap, null, 2)}</pre>
-      <h2>Recent Request Logs (latest 50)</h2>
-      <pre>${JSON.stringify(logs, null, 2)}</pre>
-    `);
+// Admin API routes
+app.get("/admin/api/token-map", (req, res) => {
+  res.json(tokenMap);
+});
+
+app.get("/admin/api/logs", (req, res) => {
+  const limit = parseInt(req.query.limit) || 100;
+  fs.readFile(logFile, "utf8", (err, data) => {
+    if (err) return res.status(500).json({ error: "Failed to read logs" });
+    const lines = data.trim().split("\n").reverse().slice(0, limit);
+    const logs = lines.map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return { error: "Invalid log line" };
+      }
+    });
+    res.json(logs);
   });
 });
 
-// Start server
+app.get("/admin/api/search-logs", (req, res) => {
+  const token = req.query.token;
+  if (!token) return res.status(400).json({ error: "Missing token param" });
+
+  fs.readFile(logFile, "utf8", (err, data) => {
+    if (err) return res.status(500).json({ error: "Failed to read logs" });
+
+    const matched = data.trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .filter((log) => log.fakeToken === token)
+      .reverse();
+
+    res.json(matched.slice(0, 100));
+  });
+});
+
+app.get("/admin/api/download-logs", (req, res) => {
+  fs.readFile(logFile, "utf8", (err, data) => {
+    if (err) return res.status(500).send("Failed to download logs");
+    const logs = data.trim().split("\n").map((line) => JSON.parse(line));
+    res.setHeader("Content-Disposition", "attachment; filename=logs.json");
+    res.json(logs);
+  });
+});
+
+// Start the server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Gateway running on port ${PORT}`));
