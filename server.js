@@ -9,13 +9,18 @@ const path = require("path");
 const app = express();
 app.use(express.json());
 
+// Root route for test
+app.get("/", (req, res) => {
+  res.send("Viber Token Gateway is running. Use /viber/send_message API.");
+});
+
 // Token map from env
 const tokenMap = {
   "FAKE_TOKEN_555": process.env.TOKEN_FAKE_TOKEN_555,
   "FAKE_TEST_123": process.env.TOKEN_FAKE_TEST_123,
 };
 
-// Rate limiter - limit per IP
+// Rate limiter
 const limiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
   max: 30,
@@ -23,12 +28,11 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// Log directory & file setup
+// Log setup
 const logDir = path.join(__dirname, "logs");
 if (!fs.existsSync(logDir)) fs.mkdirSync(logDir);
 const logFile = path.join(logDir, "requests.log");
 
-// Simple async logger function
 function logRequest(entry) {
   const logLine = JSON.stringify(entry) + "\n";
   fs.appendFile(logFile, logLine, (err) => {
@@ -36,14 +40,13 @@ function logRequest(entry) {
   });
 }
 
-// Main API: Viber send_message proxy
+// Main API
 app.post("/viber/send_message", async (req, res) => {
   const fakeToken = req.headers["x-fake-token"];
   const realToken = tokenMap[fakeToken];
 
   if (!realToken) return res.status(403).json({ error: "Invalid token" });
 
-  // Log the request with timestamp, IP, fakeToken
   logRequest({
     timestamp: new Date().toISOString(),
     ip: req.ip,
@@ -69,17 +72,16 @@ app.post("/viber/send_message", async (req, res) => {
   }
 });
 
-// Basic Auth for admin dashboard (configure USERNAME and PASSWORD in .env)
+// Admin dashboard with basic auth
 app.use(
   "/admin",
   basicAuth({
     users: { [process.env.ADMIN_USERNAME]: process.env.ADMIN_PASSWORD },
     challenge: true,
-    unauthorizedResponse: (req) => "Unauthorized",
+    unauthorizedResponse: () => "Unauthorized",
   })
 );
 
-// Simple Admin Dashboard: view recent logs & tokens
 app.get("/admin", (req, res) => {
   fs.readFile(logFile, "utf8", (err, data) => {
     if (err) {
@@ -90,7 +92,7 @@ app.get("/admin", (req, res) => {
       .split("\n")
       .map((line) => JSON.parse(line))
       .reverse()
-      .slice(0, 50); // last 50 logs
+      .slice(0, 50);
 
     res.send(`
       <h1>Admin Dashboard</h1>
