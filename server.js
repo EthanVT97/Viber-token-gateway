@@ -1,4 +1,3 @@
-// Viber Token Gateway - Full Version
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
@@ -11,6 +10,11 @@ const morgan = require("morgan");
 const crypto = require("crypto");
 
 const app = express();
+
+// Environment variables
+const TOKEN_PATH = process.env.TOKEN_PATH || path.join(__dirname, "tokens.json");
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "viber2025"; // Default password for dev, change in prod!
 
 // Welcome Page
 app.get('/', (req, res) => {
@@ -48,11 +52,14 @@ app.use(apiLimiter);
 let tokenMapCache = null;
 let lastTokenMapModified = null;
 function loadTokenMap() {
-  const tokenPath = path.join(__dirname, "tokens.json");
   try {
-    const stats = fs.statSync(tokenPath);
+    if (!fs.existsSync(TOKEN_PATH)) {
+      console.error(`tokens.json file not found at ${TOKEN_PATH}`);
+      return {};
+    }
+    const stats = fs.statSync(TOKEN_PATH);
     if (!tokenMapCache || stats.mtimeMs !== lastTokenMapModified) {
-      const raw = fs.readFileSync(tokenPath, "utf8");
+      const raw = fs.readFileSync(TOKEN_PATH, "utf8");
       tokenMapCache = JSON.parse(raw);
       lastTokenMapModified = stats.mtimeMs;
       console.log("Token map reloaded at", new Date().toISOString());
@@ -64,12 +71,22 @@ function loadTokenMap() {
   }
 }
 
-// Logging
+// Logging setup
 const logDir = path.join(__dirname, "logs");
-if (!fs.existsSync(logDir)) fs.mkdirSync(logDir);
-app.use(morgan("combined", {
-  stream: fs.createWriteStream(path.join(logDir, "access.log"), { flags: "a" })
-}));
+try {
+  if (!fs.existsSync(logDir)) fs.mkdirSync(logDir);
+} catch (e) {
+  console.error("Failed to create logs directory:", e);
+}
+let accessLogStream;
+try {
+  accessLogStream = fs.createWriteStream(path.join(logDir, "access.log"), { flags: "a" });
+  app.use(morgan("combined", { stream: accessLogStream }));
+} catch (e) {
+  console.error("Failed to create access log stream:", e);
+}
+
+// Separate request log for API requests
 const requestLogStream = fs.createWriteStream(path.join(logDir, "requests.log"), { flags: "a" });
 function logRequest(entry) {
   requestLogStream.write(JSON.stringify({
@@ -103,19 +120,11 @@ async function forwardViberAPI(realToken, endpoint, body = {}, retries = 3) {
   }
 }
 
-// Admin Auth
+// Admin Auth for /admin routes
 app.use("/admin", basicAuth({
-  users: {
-    [process.env.ADMIN_USERNAME || "admin"]: process.env.ADMIN_PASSWORD || crypto.randomBytes(8).toString("hex")
-  },
+  users: { [ADMIN_USERNAME]: ADMIN_PASSWORD },
   challenge: true,
-  unauthorizedResponse: { error: "Unauthorized" },
-  authorizeAsync: true,
-  authorizer: (username, password, cb) => {
-    const userMatches = basicAuth.safeCompare(username, process.env.ADMIN_USERNAME || "admin");
-    const passMatches = basicAuth.safeCompare(password, process.env.ADMIN_PASSWORD || "");
-    cb(null, userMatches && passMatches);
-  }
+  unauthorizedResponse: { error: "Unauthorized" }
 }));
 
 // Health Check
@@ -180,7 +189,11 @@ function loadFakeBots() {
   }
 }
 function saveFakeBots(data) {
-  fs.writeFileSync(fakeBotFile, JSON.stringify(data, null, 2), "utf8");
+  try {
+    fs.writeFileSync(fakeBotFile, JSON.stringify(data, null, 2), "utf8");
+  } catch (e) {
+    console.error("Failed to save fake bots:", e);
+  }
 }
 
 app.get("/viber/fake_info", (req, res) => {
@@ -239,7 +252,7 @@ app.post("/admin/api/add-token", (req, res) => {
       createdAt: new Date().toISOString(),
       lastUsed: null
     };
-    fs.writeFileSync(path.join(__dirname, "tokens.json"), JSON.stringify(map, null, 2), "utf8");
+    fs.writeFileSync(TOKEN_PATH, JSON.stringify(map, null, 2), "utf8");
     tokenMapCache = null;
     res.json({ status: "ok", message: "Token added" });
   } catch (e) {
@@ -265,4 +278,4 @@ app.listen(PORT, () => {
   console.log(`Admin panel: http://localhost:${PORT}/admin`);
   console.log(`Health check: http://localhost:${PORT}/healthz`);
 });
-                                      
+    
