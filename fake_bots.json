@@ -1,0 +1,14 @@
+{
+  "FAKE_TOKEN_555": {
+    "name": "My Fake Bot",
+    "uri": "mybot",
+    "icon": "https://example.com/fakeicon.jpg",
+    "background": "https://example.com/fakebg.jpg"
+  },
+  "FAKE_TEST_123": {
+    "name": "Another Bot",
+    "uri": "testbot",
+    "icon": "",
+    "background": ""
+  }
+}
