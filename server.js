@@ -20,10 +20,7 @@ app.use(express.json({ limit: "10kb" }));
 app.use(express.urlencoded({ extended: true, limit: "10kb" }));
 app.set("trust proxy", 1);
 
-app.get("/", (req, res) => {
-  res.send("Viber Token Gateway is running.");
-});
-
+// Serve static files but protect .json from direct access
 app.use("/", express.static(path.join(__dirname, "public"), {
   extensions: ["html"],
   index: false,
@@ -35,6 +32,7 @@ app.use("/", express.static(path.join(__dirname, "public"), {
   }
 }));
 
+// Rate limiter (skip localhost)
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 100,
@@ -43,16 +41,20 @@ const apiLimiter = rateLimit({
 });
 app.use(apiLimiter);
 
+// Logging
 const logDir = path.join(__dirname, "logs");
 if (!fs.existsSync(logDir)) fs.mkdirSync(logDir);
+
 const accessLogStream = fs.createWriteStream(path.join(logDir, "access.log"), { flags: "a" });
 app.use(morgan("combined", { stream: accessLogStream }));
 
 const requestLogStream = fs.createWriteStream(path.join(logDir, "requests.log"), { flags: "a" });
 function logRequest(entry) {
-  requestLogStream.write(JSON.stringify({ ...entry, timestamp: new Date().toISOString(), logId: crypto.randomBytes(4).toString("hex") }) + "\n");
+  const logEntry = { ...entry, timestamp: new Date().toISOString(), logId: crypto.randomBytes(4).toString("hex") };
+  requestLogStream.write(JSON.stringify(logEntry) + "\n");
 }
 
+// Token map cache with reload on file change
 let tokenMapCache = null;
 let lastTokenMapModified = null;
 function loadTokenMap() {
@@ -72,6 +74,7 @@ function loadTokenMap() {
   }
 }
 
+// Forward request to Viber API
 async function forwardViberAPI(realToken, endpoint, body = {}, retries = 3) {
   try {
     return await axios.post(`https://chatapi.viber.com/pa/${endpoint}`, body, {
@@ -90,16 +93,19 @@ async function forwardViberAPI(realToken, endpoint, body = {}, retries = 3) {
   }
 }
 
+// Basic Auth for admin routes
 app.use("/admin", basicAuth({
   users: { [ADMIN_USERNAME]: ADMIN_PASSWORD },
   challenge: true,
   unauthorizedResponse: { error: "Unauthorized" }
 }));
 
+// Healthcheck
 app.get("/healthz", (req, res) => {
   res.json({ status: "ok", uptime: process.uptime(), timestamp: new Date().toISOString() });
 });
 
+// Proxy Viber API endpoints with fake token mapping and header validation
 ["send_message", "get_info", "transfer_owner", "add_member"].forEach(endpoint => {
   app.post(`/viber/${endpoint}`, async (req, res) => {
     const fakeToken = req.headers["x-fake-token"];
@@ -129,6 +135,7 @@ app.get("/healthz", (req, res) => {
   });
 });
 
+// Fake bot info handling
 const fakeBotFile = path.join(__dirname, "fake_bots.json");
 function loadFakeBots() {
   try {
@@ -166,10 +173,12 @@ app.post("/viber/fake_info", (req, res) => {
   res.json({ status: "ok", message: "Fake bot info updated" });
 });
 
+// Admin API to read token map
 app.get("/admin/api/token-map", (req, res) => {
   res.json(loadTokenMap());
 });
 
+// Admin API to read recent logs with optional filtering by fakeToken
 app.get("/admin/api/logs", (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 100, 1000);
   const searchToken = req.query.token;
@@ -188,6 +197,7 @@ app.get("/admin/api/logs", (req, res) => {
   }
 });
 
+// Admin API to add a new fakeToken => realToken mapping with URI
 app.post("/admin/api/add-token", (req, res) => {
   const { fakeToken, real_token, uri } = req.body;
   if (!fakeToken || !real_token || !uri) {
@@ -202,33 +212,48 @@ app.post("/admin/api/add-token", (req, res) => {
       lastUsed: null
     };
     fs.writeFileSync(TOKEN_PATH, JSON.stringify(map, null, 2), "utf8");
-    tokenMapCache = null;
+    tokenMapCache = null; // force reload
     res.json({ status: "ok", message: "Token added" });
   } catch (e) {
     res.status(500).json({ error: "Failed to write token map" });
   }
 });
 
-// ✅ Webhook endpoint
-app.post("/viber/webhook/:uri", express.raw({ type: "*/*" }), (req, res) => {
+// === FULL WORKING WEBHOOK ===
+// Accept raw body for signature validation
+app.post("/viber/webhook/:uri", express.raw({ type: "*/*", limit: "20kb" }), (req, res) => {
   const uri = req.params.uri;
   const signature = req.headers['x-viber-content-signature'];
   const map = loadTokenMap();
 
+  // Find fakeToken for this URI
   const fakeToken = Object.keys(map).find(token => map[token].uri === uri);
   if (!fakeToken) return res.status(404).json({ error: "Unknown URI" });
 
   const realToken = map[fakeToken].real_token;
-  const computedSignature = crypto.createHmac("sha256", realToken).update(req.body).digest("hex");
-  if (signature !== computedSignature) return res.status(403).json({ error: "Invalid signature" });
 
-  const payload = JSON.parse(req.body.toString());
+  // Signature is base64 HMAC SHA256 of raw body with realToken as key (verify per Viber docs)
+  const computedSignature = crypto.createHmac("sha256", realToken).update(req.body).digest("base64");
+  if (signature !== computedSignature) {
+    return res.status(403).json({ error: "Invalid signature" });
+  }
+
+  // Parse payload
+  let payload;
+  try {
+    payload = JSON.parse(req.body.toString());
+  } catch (e) {
+    return res.status(400).json({ error: "Invalid JSON payload" });
+  }
+
+  // Log the webhook event
   logRequest({ type: "webhook", uri, fakeToken, ip: req.ip, event: payload.event, data: payload });
 
-  if (payload.event === "webhook") return res.json({ status: 0 });
+  // For webhook validation event or basic success
   res.status(200).json({ status: 0 });
 });
 
+// Global error handler
 app.use((err, req, res, next) => {
   console.error(err.stack);
   logRequest({ type: "server_error", error: err.message, stack: process.env.NODE_ENV === "development" ? err.stack : undefined });
