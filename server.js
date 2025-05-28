@@ -11,25 +11,19 @@ const crypto = require("crypto");
 
 const app = express();
 
-// Environment variables
 const TOKEN_PATH = process.env.TOKEN_PATH || path.join(__dirname, "tokens.json");
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "viber2025";
 
-// Middleware
-app.use(helmet({
-  contentSecurityPolicy: false
-}));
+app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: "10kb" }));
 app.use(express.urlencoded({ extended: true, limit: "10kb" }));
 app.set("trust proxy", 1);
 
-// Welcome Page
 app.get("/", (req, res) => {
   res.send("Viber Token Gateway is running.");
 });
 
-// Static file server with JSON blocking
 app.use("/", express.static(path.join(__dirname, "public"), {
   extensions: ["html"],
   index: false,
@@ -41,37 +35,26 @@ app.use("/", express.static(path.join(__dirname, "public"), {
   }
 }));
 
-// Rate Limiting
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 100,
   message: { error: "Too many requests, please try again later." },
   skip: req => req.ip === "127.0.0.1",
-  standardHeaders: false,
-  legacyHeaders: false,
 });
 app.use(apiLimiter);
 
-// Logging
 const logDir = path.join(__dirname, "logs");
 if (!fs.existsSync(logDir)) fs.mkdirSync(logDir);
-
 const accessLogStream = fs.createWriteStream(path.join(logDir, "access.log"), { flags: "a" });
 app.use(morgan("combined", { stream: accessLogStream }));
 
 const requestLogStream = fs.createWriteStream(path.join(logDir, "requests.log"), { flags: "a" });
 function logRequest(entry) {
-  requestLogStream.write(JSON.stringify({
-    ...entry,
-    timestamp: new Date().toISOString(),
-    logId: crypto.randomBytes(4).toString("hex")
-  }) + "\n");
+  requestLogStream.write(JSON.stringify({ ...entry, timestamp: new Date().toISOString(), logId: crypto.randomBytes(4).toString("hex") }) + "\n");
 }
 
-// Token Map Loader with Caching
 let tokenMapCache = null;
 let lastTokenMapModified = null;
-
 function loadTokenMap() {
   try {
     if (!fs.existsSync(TOKEN_PATH)) return {};
@@ -89,7 +72,6 @@ function loadTokenMap() {
   }
 }
 
-// Forward to Viber with retry
 async function forwardViberAPI(realToken, endpoint, body = {}, retries = 3) {
   try {
     return await axios.post(`https://chatapi.viber.com/pa/${endpoint}`, body, {
@@ -108,23 +90,16 @@ async function forwardViberAPI(realToken, endpoint, body = {}, retries = 3) {
   }
 }
 
-// Admin Basic Auth
 app.use("/admin", basicAuth({
   users: { [ADMIN_USERNAME]: ADMIN_PASSWORD },
   challenge: true,
   unauthorizedResponse: { error: "Unauthorized" }
 }));
 
-// Health Check
 app.get("/healthz", (req, res) => {
-  res.json({
-    status: "ok",
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString()
-  });
+  res.json({ status: "ok", uptime: process.uptime(), timestamp: new Date().toISOString() });
 });
 
-// Proxy endpoints
 ["send_message", "get_info", "transfer_owner", "add_member"].forEach(endpoint => {
   app.post(`/viber/${endpoint}`, async (req, res) => {
     const fakeToken = req.headers["x-fake-token"];
@@ -136,14 +111,7 @@ app.get("/healthz", (req, res) => {
 
     try {
       const response = await forwardViberAPI(profile.real_token, endpoint, req.body);
-      logRequest({
-        type: "viber_api",
-        ip: req.ip,
-        fakeToken,
-        endpoint,
-        status: response.status,
-        response: response.data
-      });
+      logRequest({ type: "viber_api", ip: req.ip, fakeToken, endpoint, status: response.status, response: response.data });
       res.status(response.status).json(response.data);
     } catch (err) {
       const errorData = {
@@ -156,18 +124,12 @@ app.get("/healthz", (req, res) => {
         response: err.response?.data
       };
       logRequest(errorData);
-      res.status(errorData.status).json({
-        error: "Viber API Error",
-        detail: err.message,
-        response: err.response?.data
-      });
+      res.status(errorData.status).json({ error: "Viber API Error", detail: err.message, response: err.response?.data });
     }
   });
 });
 
-// Fake Bot Info APIs
 const fakeBotFile = path.join(__dirname, "fake_bots.json");
-
 function loadFakeBots() {
   try {
     if (!fs.existsSync(fakeBotFile)) return {};
@@ -177,7 +139,6 @@ function loadFakeBots() {
     return {};
   }
 }
-
 function saveFakeBots(data) {
   try {
     fs.writeFileSync(fakeBotFile, JSON.stringify(data, null, 2), "utf8");
@@ -205,7 +166,6 @@ app.post("/viber/fake_info", (req, res) => {
   res.json({ status: "ok", message: "Fake bot info updated" });
 });
 
-// Admin APIs
 app.get("/admin/api/token-map", (req, res) => {
   res.json(loadTokenMap());
 });
@@ -215,9 +175,7 @@ app.get("/admin/api/logs", (req, res) => {
   const searchToken = req.query.token;
   try {
     let logs = fs.readFileSync(path.join(logDir, "requests.log"), "utf8").trim().split("\n").reverse();
-    if (searchToken) {
-      logs = logs.filter(line => line.includes(`"fakeToken":"${searchToken}"`));
-    }
+    if (searchToken) logs = logs.filter(line => line.includes(`"fakeToken":"${searchToken}"`));
     res.json(logs.slice(0, limit).map(line => {
       try {
         return JSON.parse(line);
@@ -251,21 +209,33 @@ app.post("/admin/api/add-token", (req, res) => {
   }
 });
 
-// Global Error Handler
+// ✅ Webhook endpoint
+app.post("/viber/webhook/:uri", express.raw({ type: "*/*" }), (req, res) => {
+  const uri = req.params.uri;
+  const signature = req.headers['x-viber-content-signature'];
+  const map = loadTokenMap();
+
+  const fakeToken = Object.keys(map).find(token => map[token].uri === uri);
+  if (!fakeToken) return res.status(404).json({ error: "Unknown URI" });
+
+  const realToken = map[fakeToken].real_token;
+  const computedSignature = crypto.createHmac("sha256", realToken).update(req.body).digest("hex");
+  if (signature !== computedSignature) return res.status(403).json({ error: "Invalid signature" });
+
+  const payload = JSON.parse(req.body.toString());
+  logRequest({ type: "webhook", uri, fakeToken, ip: req.ip, event: payload.event, data: payload });
+
+  if (payload.event === "webhook") return res.json({ status: 0 });
+  res.status(200).json({ status: 0 });
+});
+
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  logRequest({
-    type: "server_error",
-    error: err.message,
-    stack: process.env.NODE_ENV === "development" ? err.stack : undefined
-  });
+  logRequest({ type: "server_error", error: err.message, stack: process.env.NODE_ENV === "development" ? err.stack : undefined });
   res.status(500).json({ error: "Internal Server Error" });
 });
 
-// Start Server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Viber Token Gateway running on port ${PORT}`);
-  console.log(`Admin panel: http://localhost:${PORT}/admin`);
-  console.log(`Health check: http://localhost:${PORT}/healthz`);
 });
