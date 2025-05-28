@@ -20,7 +20,7 @@ app.use(express.json({ limit: "10kb" }));
 app.use(express.urlencoded({ extended: true, limit: "10kb" }));
 app.set("trust proxy", 1);
 
-// Serve static files but protect .json files from direct access
+// Static file serving, block direct access to .json files
 app.use(
   "/",
   express.static(path.join(__dirname, "public"), {
@@ -29,7 +29,7 @@ app.use(
     setHeaders: (res, filePath) => {
       if (filePath.endsWith(".json")) {
         res.setHeader("X-Content-Type-Options", "nosniff");
-        return res.status(403).end("Access denied");
+        res.status(403).end("Access denied");
       }
     },
   })
@@ -220,9 +220,9 @@ app.get("/admin/api/logs", (req, res) => {
   }
 });
 
-// Admin: Add fakeToken -> realToken mapping with URI
+// Admin: Add fakeToken -> realToken mapping with URI and optional forwarding URL
 app.post("/admin/api/add-token", (req, res) => {
-  const { fakeToken, real_token, uri } = req.body;
+  const { fakeToken, real_token, uri, forwardUrl } = req.body;
   if (!fakeToken || !real_token || !uri) {
     return res.status(400).json({ error: "Missing parameters" });
   }
@@ -231,6 +231,7 @@ app.post("/admin/api/add-token", (req, res) => {
     map[fakeToken] = {
       real_token,
       uri,
+      forwardUrl: forwardUrl || null,
       createdAt: new Date().toISOString(),
       lastUsed: null,
     };
@@ -244,7 +245,8 @@ app.post("/admin/api/add-token", (req, res) => {
 
 // === Webhook endpoint ===
 // Accept raw body and verify Viber signature (base64 HMAC SHA256)
-app.post("/viber/webhook/:uri", express.raw({ type: "*/*", limit: "20kb" }), (req, res) => {
+// Log payload and optionally forward to forwarding URL with retries
+app.post("/viber/webhook/:uri", express.raw({ type: "*/*", limit: "20kb" }), async (req, res) => {
   const uri = req.params.uri;
   const signature = req.headers["x-viber-content-signature"];
   const map = loadTokenMap();
@@ -254,7 +256,6 @@ app.post("/viber/webhook/:uri", express.raw({ type: "*/*", limit: "20kb" }), (re
 
   const realToken = map[fakeToken].real_token;
 
-  // Compute signature (base64 HMAC SHA256 of raw body)
   const computedSignature = crypto.createHmac("sha256", realToken).update(req.body).digest("base64");
   if (signature !== computedSignature) {
     return res.status(403).json({ error: "Invalid signature" });
@@ -263,3 +264,63 @@ app.post("/viber/webhook/:uri", express.raw({ type: "*/*", limit: "20kb" }), (re
   let payload;
   try {
     payload = JSON.parse(req.body.toString());
+
+    logRequest({
+      type: "viber_webhook",
+      fakeToken,
+      uri,
+      ip: req.ip,
+      payload,
+    });
+
+    // Forward the event to an external endpoint if configured
+    const forwardUrl = map[fakeToken].forwardUrl;
+
+    if (forwardUrl) {
+      const maxRetries = 3;
+      let attempt = 0;
+      let forwarded = false;
+      let lastError = null;
+
+      while (attempt < maxRetries && !forwarded) {
+        try {
+          await axios.post(forwardUrl, payload, {
+            headers: {
+              "Content-Type": "application/json",
+              "X-Forwarded-For": req.ip,
+              "X-Fake-Token": fakeToken,
+            },
+            timeout: 5000,
+          });
+          forwarded = true;
+        } catch (err) {
+          lastError = err;
+          attempt++;
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+      }
+
+      if (!forwarded) {
+        logRequest({
+          type: "viber_webhook_forward_error",
+          fakeToken,
+          uri,
+          ip: req.ip,
+          error: lastError?.message || "Unknown error",
+        });
+
+        return res.status(500).json({ error: "Failed to forward webhook event" });
+      }
+    }
+
+    res.status(200).json({ status: "ok" });
+  } catch (err) {
+    console.error("Failed to parse webhook payload:", err);
+    res.status(400).json({ error: "Invalid JSON payload" });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Viber token gateway running on port ${PORT}`);
+});
