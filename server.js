@@ -700,5 +700,26 @@ app.get("/admin/api/dashboard-stats", (req, res) => {
     
     // Recent activity (last 24 hours)
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const recentlyUsed = tokens.filter(([, profile]) => 
-      profile.las
+    const recentlyUsed = tokens.filter(([, profile]) =>
+      profile.lastUsed && new Date(profile.lastUsed) >= oneDayAgo
+    ).length;
+
+    res.json({
+      status: "ok",
+      totalTokens: tokens.length,
+      activeTokens,
+      totalUsage,
+      recentlyUsed,
+      fakeBots: Object.keys(fakeBots).length,
+      version: "2.1.0",
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error(chalk.red("Failed to generate dashboard stats:"), err);
+    res.status(500).json({
+      error: "Failed to generate dashboard statistics",
+      code: "DASHBOARD_STATS_ERROR",
+      details: err.message
+    });
+  }
+});
