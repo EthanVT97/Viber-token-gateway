@@ -1,33 +1,64 @@
 {
   "name": "viber-token-gateway",
-  "version": "2.0.0",
-  "description": "Secure proxy gateway for Viber bots with token mapping, rate limiting and admin dashboard",
+  "version": "2.1.0",
+  "description": "Advanced secure proxy gateway for Viber bots with token mapping, rate limiting, real-time monitoring and admin dashboard",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js --ignore logs/ --ignore public/",
+    "test": "node check_balance.js server.js",
+    "lint": "eslint *.js --fix",
+    "clean-logs": "rm -rf logs/*.log && mkdir -p logs",
+    "backup-tokens": "cp tokens.json tokens.backup.$(date +%Y%m%d_%H%M%S).json"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
   },
   "keywords": [
     "viber",
     "bot",
     "proxy",
-    "gateway"
+    "gateway",
+    "security",
+    "webhook",
+    "api-proxy",
+    "token-management"
   ],
-  "author": "EthanVT97",
+  "author": "EthanVT97 <ethant@skilldesk.dev>",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EthanVT97/viber-token-gateway.git"
+  },
   "dependencies": {
-    "axios": "^1.6.2",
+    "axios": "^1.6.7",
+    "bcrypt": "^5.1.1",
+    "chalk": "^4.1.2",
+    "cors": "^2.8.5",
     "dotenv": "^16.4.1",
-    "express": "^4.18.2",
+    "express": "^4.18.3",
     "express-basic-auth": "^1.2.1",
-    "express-rate-limit": "^6.7.0",
+    "express-rate-limit": "^7.1.5",
     "helmet": "^7.1.0",
-    "morgan": "^1.10.0"
+    "joi": "^17.12.0",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.0",
+    "ws": "^8.16.0"
   },
   "devDependencies": {
-    "nodemon": "^3.0.2"
+    "eslint": "^8.57.0",
+    "nodemon": "^3.0.3"
+  },
+  "eslintConfig": {
+    "env": {
+      "node": true,
+      "es2022": true
+    },
+    "extends": "eslint:recommended",
+    "rules": {
+      "no-console": "off",
+      "no-unused-vars": "warn"
+    }
   }
 }
