@@ -723,3 +723,9 @@ app.get("/admin/api/dashboard-stats", (req, res) => {
     });
   }
 });
+// Start the server
+const PORT = process.env.PORT || 3000;
+
+server.listen(PORT, () => {
+  console.log(chalk.green(`✅ Server listening on port ${PORT}`));
+});
