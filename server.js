@@ -9,30 +9,43 @@ const helmet = require("helmet");
 const morgan = require("morgan");
 const crypto = require("crypto");
 const cors = require("cors");
+const chalk = require("chalk");
+const Joi = require("joi");
+const jwt = require("jsonwebtoken");
+const WebSocket = require("ws");
+const http = require("http");
 
 const app = express();
+const server = http.createServer(app);
 
 // Configuration constants
 const TOKEN_PATH = process.env.TOKEN_PATH || path.join(__dirname, "tokens.json");
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "viber2025";
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
 const NODE_ENV = process.env.NODE_ENV || "development";
+const WEBSOCKET_PORT = process.env.WEBSOCKET_PORT || 3001;
 
-// Security middleware
+console.log(chalk.blue.bold("🚀 Viber Token Gateway v2.1.0"));
+console.log(chalk.gray(`Environment: ${NODE_ENV}`));
+
+// Enhanced security middleware
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com"],
       imgSrc: ["'self'", "data:", "https:"],
+      connectSrc: ["'self'", "ws:", "wss:"],
+      fontSrc: ["'self'", "https://cdnjs.cloudflare.com"],
     },
   },
   crossOriginEmbedderPolicy: false
 }));
 
 app.use(cors({
-  origin: NODE_ENV === "production" ? false : "*",
+  origin: NODE_ENV === "production" ? process.env.ALLOWED_ORIGINS?.split(',') || false : "*",
   credentials: true
 }));
 
@@ -40,57 +53,107 @@ app.use(express.json({ limit: "10kb" }));
 app.use(express.urlencoded({ extended: true, limit: "10kb" }));
 app.set("trust proxy", 1);
 
-// Static file serving with proper security
+// Static file serving with enhanced security
 app.use("/", express.static(path.join(__dirname, "public"), {
   extensions: ["html"],
   index: false,
   maxAge: NODE_ENV === "production" ? "1d" : "0",
   setHeaders: (res, filePath) => {
-    if (filePath.endsWith(".json")) {
+    if (filePath.endsWith(".json") && !filePath.includes("public")) {
       res.setHeader("X-Content-Type-Options", "nosniff");
       res.status(403).end("Access denied");
     }
   },
 }));
 
-// Enhanced rate limiting with IP tracking
-const createLimiter = (windowMs, max, message) => rateLimit({
+// Enhanced rate limiting with different tiers
+const createLimiter = (windowMs, max, message, skipCondition = null) => rateLimit({
   windowMs,
   max,
-  message: { error: message },
+  message: { error: message, retryAfter: Math.ceil(windowMs / 1000) },
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => {
+    if (skipCondition && skipCondition(req)) return true;
     const isLocal = req.ip === "127.0.0.1" || req.ip === "::1" || req.ip === "::ffff:127.0.0.1";
     return NODE_ENV === "development" && isLocal;
   },
+  keyGenerator: (req) => `${req.ip}-${req.headers['user-agent'] || 'unknown'}`,
 });
 
-// Different limits for different endpoints
-const apiLimiter = createLimiter(60 * 1000, 100, "Too many API requests");
-const webhookLimiter = createLimiter(60 * 1000, 500, "Too many webhook requests");
-const adminLimiter = createLimiter(15 * 60 * 1000, 50, "Too many admin requests");
+// Multi-tier rate limiting
+const apiLimiter = createLimiter(60 * 1000, 120, "Too many API requests");
+const webhookLimiter = createLimiter(60 * 1000, 1000, "Too many webhook requests");
+const adminLimiter = createLimiter(15 * 60 * 1000, 100, "Too many admin requests");
+const strictLimiter = createLimiter(60 * 1000, 10, "Rate limit exceeded for sensitive operations");
 
 app.use("/viber", apiLimiter);
 app.use("/viber/webhook", webhookLimiter);
 app.use("/admin", adminLimiter);
 
-// Logging setup with proper error handling
+// Enhanced logging setup
 const logDir = path.join(__dirname, "logs");
 if (!fs.existsSync(logDir)) {
   try {
     fs.mkdirSync(logDir, { recursive: true });
+    console.log(chalk.green("✓ Logs directory created"));
   } catch (err) {
-    console.error("Failed to create logs directory:", err);
+    console.error(chalk.red("✗ Failed to create logs directory:"), err);
   }
 }
 
+// Custom Morgan format for better logging
+morgan.token('body', (req) => {
+  const body = req.body;
+  if (body && typeof body === 'object') {
+    const sanitized = { ...body };
+    if (sanitized.real_token) sanitized.real_token = '***HIDDEN***';
+    if (sanitized.password) sanitized.password = '***HIDDEN***';
+    return JSON.stringify(sanitized);
+  }
+  return '-';
+});
+
 const accessLogStream = fs.createWriteStream(path.join(logDir, "access.log"), { flags: "a" });
-app.use(morgan("combined", { 
+app.use(morgan(":remote-addr - :remote-user [:date[clf]] \":method :url HTTP/:http-version\" :status :res[content-length] \":referrer\" \":user-agent\" :body", { 
   stream: accessLogStream,
-  skip: (req, res) => NODE_ENV === "development" && req.url === "/healthz"
+  skip: (req, res) => NODE_ENV === "development" && (req.url === "/healthz" || req.url.startsWith("/admin/api/realtime"))
 }));
 
+// WebSocket for real-time updates
+const wss = new WebSocket.Server({ server, path: '/admin/ws' });
+const adminClients = new Set();
+
+wss.on('connection', (ws, req) => {
+  console.log(chalk.yellow('📡 Admin WebSocket connected'));
+  adminClients.add(ws);
+  
+  ws.on('close', () => {
+    adminClients.delete(ws);
+    console.log(chalk.yellow('📡 Admin WebSocket disconnected'));
+  });
+  
+  ws.on('error', (err) => {
+    console.error(chalk.red('WebSocket error:'), err);
+    adminClients.delete(ws);
+  });
+});
+
+function broadcastToAdmins(data) {
+  const message = JSON.stringify(data);
+  adminClients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      try {
+        client.send(message);
+      } catch (err) {
+        console.error(chalk.red('Failed to send WebSocket message:'), err);
+        adminClients.delete(client);
+      }
+    }
+  });
+}
+
+// Enhanced request logging with real-time updates
 const requestLogFile = path.join(logDir, "requests.log");
 function logRequest(entry) {
   try {
@@ -98,17 +161,52 @@ function logRequest(entry) {
       ...entry,
       timestamp: new Date().toISOString(),
       logId: crypto.randomBytes(4).toString("hex"),
-      userAgent: entry.userAgent || "unknown"
+      userAgent: entry.userAgent || "unknown",
+      sessionId: entry.sessionId || null
     };
     
     const logLine = JSON.stringify(logEntry) + "\n";
     fs.appendFileSync(requestLogFile, logLine);
+    
+    // Broadcast to admin clients for real-time updates
+    broadcastToAdmins({
+      type: 'new_log',
+      data: logEntry
+    });
+    
+    // Log to console with colors based on type
+    const colors = {
+      viber_api_success: chalk.green,
+      viber_api_error: chalk.red,
+      invalid_token_attempt: chalk.yellow,
+      webhook_received: chalk.blue,
+      admin_login: chalk.magenta
+    };
+    
+    const colorFn = colors[entry.type] || chalk.gray;
+    console.log(colorFn(`[${entry.type.toUpperCase()}]`), logEntry.fakeToken || logEntry.uri || 'N/A');
+    
   } catch (err) {
-    console.error("Failed to write request log:", err);
+    console.error(chalk.red("Failed to write request log:"), err);
   }
 }
 
-// Token map management with file watching
+// Input validation schemas
+const tokenSchema = Joi.object({
+  fakeToken: Joi.string().alphanum().min(8).max(50).required(),
+  real_token: Joi.string().min(20).max(200).required(),
+  uri: Joi.string().alphanum().min(3).max(50).required(),
+  forwardUrl: Joi.string().uri().optional().allow('', null)
+});
+
+const fakeBotSchema = Joi.object({
+  name: Joi.string().min(1).max(100).required(),
+  uri: Joi.string().alphanum().min(3).max(50).required(),
+  icon: Joi.string().uri().optional().allow(''),
+  background: Joi.string().uri().optional().allow('')
+});
+
+// Token map management with file watching and caching
 let tokenMapCache = null;
 let lastTokenMapModified = null;
 let tokenMapWatcher = null;
@@ -116,9 +214,9 @@ let tokenMapWatcher = null;
 function loadTokenMap() {
   try {
     if (!fs.existsSync(TOKEN_PATH)) {
-      // Create default token map if it doesn't exist
       const defaultMap = {};
       fs.writeFileSync(TOKEN_PATH, JSON.stringify(defaultMap, null, 2));
+      console.log(chalk.yellow("⚠ Created default token map"));
       return defaultMap;
     }
     
@@ -127,38 +225,81 @@ function loadTokenMap() {
       const raw = fs.readFileSync(TOKEN_PATH, "utf8");
       tokenMapCache = JSON.parse(raw);
       lastTokenMapModified = stats.mtimeMs;
-      console.log(`Token map ${tokenMapCache ? 'reloaded' : 'loaded'} at ${new Date().toISOString()}`);
+      console.log(chalk.green(`✓ Token map ${tokenMapCache ? 'reloaded' : 'loaded'} - ${Object.keys(tokenMapCache).length} tokens`));
     }
     return tokenMapCache;
   } catch (e) {
-    console.error("Error loading token map:", e);
+    console.error(chalk.red("✗ Error loading token map:"), e);
     return {};
   }
 }
 
-// Watch for token map file changes
 function watchTokenMap() {
   if (tokenMapWatcher) {
     tokenMapWatcher.close();
   }
   
   try {
-    tokenMapWatcher = fs.watchFile(TOKEN_PATH, { interval: 1000 }, () => {
-      console.log("Token map file changed, reloading...");
-      tokenMapCache = null; // Force reload
-      loadTokenMap();
+    tokenMapWatcher = fs.watchFile(TOKEN_PATH, { interval: 2000 }, () => {
+      console.log(chalk.blue("📁 Token map file changed, reloading..."));
+      const oldCount = Object.keys(tokenMapCache || {}).length;
+      tokenMapCache = null;
+      const newMap = loadTokenMap();
+      const newCount = Object.keys(newMap).length;
+      
+      broadcastToAdmins({
+        type: 'token_map_updated',
+        data: { oldCount, newCount, timestamp: new Date().toISOString() }
+      });
     });
   } catch (err) {
-    console.warn("Could not watch token map file:", err);
+    console.warn(chalk.yellow("⚠ Could not watch token map file:"), err);
   }
 }
 
-// Initialize token map and watcher
 loadTokenMap();
 watchTokenMap();
 
-// Enhanced Viber API forwarding with better error handling
+// Enhanced Viber API forwarding with circuit breaker pattern
+const circuitBreaker = {
+  failures: new Map(),
+  threshold: 5,
+  timeout: 30000,
+  
+  canExecute(key) {
+    const failure = this.failures.get(key);
+    if (!failure) return true;
+    
+    if (failure.count >= this.threshold) {
+      if (Date.now() - failure.lastFailure < this.timeout) {
+        return false;
+      } else {
+        this.failures.delete(key);
+        return true;
+      }
+    }
+    return true;
+  },
+  
+  recordSuccess(key) {
+    this.failures.delete(key);
+  },
+  
+  recordFailure(key) {
+    const failure = this.failures.get(key) || { count: 0, lastFailure: 0 };
+    failure.count++;
+    failure.lastFailure = Date.now();
+    this.failures.set(key, failure);
+  }
+};
+
 async function forwardViberAPI(realToken, endpoint, body = {}, retries = 3) {
+  const circuitKey = `${realToken}-${endpoint}`;
+  
+  if (!circuitBreaker.canExecute(circuitKey)) {
+    throw new Error('Circuit breaker open - too many failures');
+  }
+  
   let lastError;
   
   for (let attempt = 0; attempt < retries; attempt++) {
@@ -170,24 +311,27 @@ async function forwardViberAPI(realToken, endpoint, body = {}, retries = 3) {
           headers: {
             "X-Viber-Auth-Token": realToken,
             "Content-Type": "application/json",
-            "User-Agent": "ViberTokenGateway/2.0.0"
+            "User-Agent": "ViberTokenGateway/2.1.0"
           },
-          timeout: 8000,
+          timeout: 10000,
           validateStatus: (status) => status < 500 || status === 429
         }
       );
       
+      circuitBreaker.recordSuccess(circuitKey);
       return response;
     } catch (err) {
       lastError = err;
+      circuitBreaker.recordFailure(circuitKey);
       
       if (attempt < retries - 1) {
         const isRetryable = err.code === 'ECONNRESET' || 
                            err.code === 'ETIMEDOUT' ||
+                           err.code === 'ENOTFOUND' ||
                            (err.response && err.response.status >= 500);
         
         if (isRetryable) {
-          const delay = Math.pow(2, attempt) * 1000; // Exponential backoff
+          const delay = Math.min(Math.pow(2, attempt) * 1000, 5000);
           await new Promise(resolve => setTimeout(resolve, delay));
           continue;
         }
@@ -199,33 +343,112 @@ async function forwardViberAPI(realToken, endpoint, body = {}, retries = 3) {
   throw lastError;
 }
 
-// Basic Auth middleware for admin routes
+// JWT-based admin authentication
+function generateAdminToken(username) {
+  return jwt.sign(
+    { username, role: 'admin', iat: Date.now() },
+    JWT_SECRET,
+    { expiresIn: '24h' }
+  );
+}
+
+function verifyAdminToken(req, res, next) {
+  const token = req.headers.authorization?.replace('Bearer ', '') || req.cookies?.adminToken;
+  
+  if (!token) {
+    return res.status(401).json({ error: 'No authentication token provided' });
+  }
+  
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.admin = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+// Basic Auth middleware for admin routes (fallback)
 const adminAuth = basicAuth({
   users: { [ADMIN_USERNAME]: ADMIN_PASSWORD },
   challenge: true,
-  unauthorizedResponse: (req) => {
-    return { error: "Unauthorized access to admin panel" };
+  unauthorizedResponse: (req) => ({
+    error: "Unauthorized access to admin panel",
+    loginUrl: "/admin/login"
+  })
+});
+
+// Admin login endpoint for JWT
+app.post("/admin/login", strictLimiter, (req, res) => {
+  const { username, password } = req.body;
+  
+  if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
+    const token = generateAdminToken(username);
+    
+    logRequest({
+      type: "admin_login_success",
+      ip: req.ip,
+      username,
+      userAgent: req.headers["user-agent"]
+    });
+    
+    res.cookie('adminToken', token, {
+      httpOnly: true,
+      secure: NODE_ENV === 'production',
+      maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    });
+    
+    res.json({ 
+      success: true, 
+      token,
+      expiresIn: '24h'
+    });
+  } else {
+    logRequest({
+      type: "admin_login_failed",
+      ip: req.ip,
+      username,
+      userAgent: req.headers["user-agent"]
+    });
+    
+    res.status(401).json({ 
+      error: "Invalid credentials",
+      attempts: req.rateLimit?.totalHits || 1
+    });
   }
 });
 
-app.use("/admin", adminAuth);
+// Apply authentication to admin routes
+app.use("/admin/api", verifyAdminToken);
+app.use("/admin/ui", adminAuth); // Fallback to basic auth for UI
 
-// Health check endpoint with detailed info
+// Enhanced health check with detailed metrics
 app.get("/healthz", (req, res) => {
+  const tokenMap = loadTokenMap();
   const health = {
     status: "ok",
     uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),
-    memory: process.memoryUsage(),
-    version: "2.0.0",
+    version: "2.1.0",
     environment: NODE_ENV,
-    tokenMapSize: Object.keys(loadTokenMap()).length
+    metrics: {
+      memory: process.memoryUsage(),
+      tokenCount: Object.keys(tokenMap).length,
+      activeWebSockets: adminClients.size,
+      circuitBreakerFailures: circuitBreaker.failures.size
+    },
+    features: {
+      realTimeUpdates: true,
+      circuitBreaker: true,
+      rateLimiting: true,
+      webhookForwarding: true
+    }
   };
   
   res.json(health);
 });
 
-// Viber API proxy endpoints with enhanced logging
+// Viber API endpoints with enhanced error handling
 const VIBER_ENDPOINTS = [
   "send_message", 
   "get_info", 
@@ -234,18 +457,30 @@ const VIBER_ENDPOINTS = [
   "get_account_info",
   "get_user_details",
   "get_online",
-  "broadcast_message"
+  "broadcast_message",
+  "remove_member",
+  "get_members"
 ];
 
 VIBER_ENDPOINTS.forEach((endpoint) => {
   app.post(`/viber/${endpoint}`, async (req, res) => {
     const fakeToken = req.headers["x-fake-token"];
     const userAgent = req.headers["user-agent"];
+    const sessionId = req.headers["x-session-id"];
     
     if (!fakeToken) {
       return res.status(401).json({ 
         error: "Missing X-Fake-Token header",
-        code: "MISSING_TOKEN"
+        code: "MISSING_TOKEN",
+        hint: "Add 'X-Fake-Token: YOUR_FAKE_TOKEN' header"
+      });
+    }
+
+    // Validate fake token format
+    if (!/^[A-Z0-9_]{8,50}$/.test(fakeToken)) {
+      return res.status(400).json({
+        error: "Invalid fake token format",
+        code: "INVALID_TOKEN_FORMAT"
       });
     }
 
@@ -258,17 +493,21 @@ VIBER_ENDPOINTS.forEach((endpoint) => {
         ip: req.ip,
         fakeToken,
         endpoint,
-        userAgent
+        userAgent,
+        sessionId
       });
       
       return res.status(403).json({ 
         error: "Invalid or expired token",
-        code: "INVALID_TOKEN"
+        code: "INVALID_TOKEN",
+        validTokens: Object.keys(tokenMap).length
       });
     }
 
     try {
+      const startTime = Date.now();
       const response = await forwardViberAPI(profile.real_token, endpoint, req.body);
+      const duration = Date.now() - startTime;
       
       logRequest({
         type: "viber_api_success",
@@ -276,19 +515,26 @@ VIBER_ENDPOINTS.forEach((endpoint) => {
         fakeToken,
         endpoint,
         status: response.status,
+        duration,
         responseSize: JSON.stringify(response.data).length,
-        userAgent
+        userAgent,
+        sessionId
       });
       
       // Update last used timestamp
       profile.lastUsed = new Date().toISOString();
+      profile.usage = (profile.usage || 0) + 1;
       tokenMap[fakeToken] = profile;
       
       try {
         fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokenMap, null, 2));
       } catch (err) {
-        console.warn("Failed to update lastUsed timestamp:", err);
+        console.warn(chalk.yellow("⚠ Failed to update lastUsed timestamp:"), err);
       }
+      
+      // Add performance headers
+      res.setHeader('X-Response-Time', `${duration}ms`);
+      res.setHeader('X-Gateway-Version', '2.1.0');
       
       res.status(response.status).json(response.data);
       
@@ -300,7 +546,8 @@ VIBER_ENDPOINTS.forEach((endpoint) => {
         endpoint,
         error: err.message,
         status: err.response?.status || 500,
-        userAgent
+        userAgent,
+        sessionId
       };
       
       logRequest(errorData);
@@ -309,13 +556,15 @@ VIBER_ENDPOINTS.forEach((endpoint) => {
         error: "Viber API Error",
         code: "VIBER_API_ERROR",
         message: err.message,
-        status: err.response?.status || 500
+        status: err.response?.status || 500,
+        endpoint,
+        timestamp: new Date().toISOString()
       };
       
       if (NODE_ENV === "development") {
         errorResponse.debug = {
           response: err.response?.data,
-          stack: err.stack
+          stack: err.stack?.split('\n').slice(0, 5)
         };
       }
       
@@ -324,7 +573,7 @@ VIBER_ENDPOINTS.forEach((endpoint) => {
   });
 });
 
-// Fake bot info management
+// Enhanced fake bot info management
 const fakeBotFile = path.join(__dirname, "fake_bots.json");
 
 function loadFakeBots() {
@@ -336,7 +585,7 @@ function loadFakeBots() {
     }
     return JSON.parse(fs.readFileSync(fakeBotFile, "utf8"));
   } catch (e) {
-    console.error("Failed to load fake bots:", e);
+    console.error(chalk.red("Failed to load fake bots:"), e);
     return {};
   }
 }
@@ -346,12 +595,12 @@ function saveFakeBots(data) {
     fs.writeFileSync(fakeBotFile, JSON.stringify(data, null, 2), "utf8");
     return true;
   } catch (e) {
-    console.error("Failed to save fake bots:", e);
+    console.error(chalk.red("Failed to save fake bots:"), e);
     return false;
   }
 }
 
-// Get fake bot info
+// Enhanced fake bot info endpoints
 app.get("/viber/fake_info", (req, res) => {
   const fakeToken = req.headers["x-fake-token"];
   
@@ -368,7 +617,8 @@ app.get("/viber/fake_info", (req, res) => {
   if (!info) {
     return res.status(404).json({ 
       error: "No fake bot info found for this token",
-      code: "INFO_NOT_FOUND"
+      code: "INFO_NOT_FOUND",
+      availableTokens: Object.keys(fakeBots)
     });
   }
 
@@ -386,10 +636,8 @@ app.get("/viber/fake_info", (req, res) => {
   });
 });
 
-// Update fake bot info
 app.post("/viber/fake_info", (req, res) => {
   const fakeToken = req.headers["x-fake-token"];
-  const { name, uri, icon, background } = req.body;
   
   if (!fakeToken) {
     return res.status(400).json({ 
@@ -398,20 +646,21 @@ app.post("/viber/fake_info", (req, res) => {
     });
   }
 
-  if (!name || !uri) {
-    return res.status(400).json({ 
-      error: "Missing required fields: name and uri are required",
-      code: "MISSING_FIELDS"
+  // Validate input
+  const { error, value } = fakeBotSchema.validate(req.body);
+  if (error) {
+    return res.status(400).json({
+      error: "Validation failed",
+      code: "VALIDATION_ERROR",
+      details: error.details.map(d => d.message)
     });
   }
 
   const fakeBots = loadFakeBots();
   const updatedInfo = {
-    name: name.trim(),
-    uri: uri.trim(),
-    icon: icon || "",
-    background: background || "",
-    updatedAt: new Date().toISOString()
+    ...value,
+    updatedAt: new Date().toISOString(),
+    version: "2.1.0"
   };
 
   fakeBots[fakeToken] = updatedInfo;
@@ -438,330 +687,18 @@ app.post("/viber/fake_info", (req, res) => {
   });
 });
 
-// Admin API endpoints
-app.get("/admin/api/token-map", (req, res) => {
-  const tokenMap = loadTokenMap();
-  
-  // Sanitize real tokens for security
-  const sanitizedMap = {};
-  Object.keys(tokenMap).forEach(fakeToken => {
-    sanitizedMap[fakeToken] = {
-      ...tokenMap[fakeToken],
-      real_token: tokenMap[fakeToken].real_token ? "***HIDDEN***" : null
-    };
-  });
-  
-  res.json(sanitizedMap);
-});
-
-app.get("/admin/api/logs", (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit) || 100, 1000);
-  const searchToken = req.query.token;
-  const logType = req.query.type;
-  
-  try {
-    if (!fs.existsSync(requestLogFile)) {
-      return res.json([]);
-    }
-    
-    const logData = fs.readFileSync(requestLogFile, "utf8").trim();
-    if (!logData) {
-      return res.json([]);
-    }
-    
-    let logs = logData.split("\n").reverse();
-    
-    // Apply filters
-    if (searchToken) {
-      logs = logs.filter(line => line.includes(`"fakeToken":"${searchToken}"`));
-    }
-    
-    if (logType) {
-      logs = logs.filter(line => line.includes(`"type":"${logType}"`));
-    }
-    
-    const parsedLogs = logs.slice(0, limit).map(line => {
-      try {
-        return JSON.parse(line);
-      } catch {
-        return { error: "Invalid log line", raw: line };
-      }
-    });
-    
-    res.json(parsedLogs);
-  } catch (err) {
-    console.error("Failed to read logs:", err);
-    res.status(500).json({ error: "Failed to read logs", code: "LOG_READ_ERROR" });
-  }
-});
-
-app.post("/admin/api/add-token", (req, res) => {
-  const { fakeToken, real_token, uri, forwardUrl } = req.body;
-  
-  if (!fakeToken || !real_token || !uri) {
-    return res.status(400).json({ 
-      error: "Missing required parameters: fakeToken, real_token, and uri are required",
-      code: "MISSING_PARAMETERS"
-    });
-  }
-  
+// Enhanced admin API endpoints
+app.get("/admin/api/dashboard-stats", (req, res) => {
   try {
     const tokenMap = loadTokenMap();
+    const fakeBots = loadFakeBots();
     
-    // Check if fake token already exists
-    if (tokenMap[fakeToken]) {
-      return res.status(409).json({
-        error: "Fake token already exists",
-        code: "TOKEN_EXISTS"
-      });
-    }
+    // Calculate usage statistics
+    const tokens = Object.entries(tokenMap);
+    const totalUsage = tokens.reduce((sum, [, profile]) => sum + (profile.usage || 0), 0);
+    const activeTokens = tokens.filter(([, profile]) => profile.lastUsed).length;
     
-    tokenMap[fakeToken] = {
-      real_token: real_token.trim(),
-      uri: uri.trim(),
-      forwardUrl: forwardUrl ? forwardUrl.trim() : null,
-      createdAt: new Date().toISOString(),
-      lastUsed: null
-    };
-    
-    fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokenMap, null, 2), "utf8");
-    tokenMapCache = null; // Force reload
-    
-    logRequest({
-      type: "token_added",
-      ip: req.ip,
-      fakeToken,
-      uri: uri.trim(),
-      userAgent: req.headers["user-agent"]
-    });
-    
-    res.json({ 
-      status: "ok", 
-      message: "Token added successfully",
-      token: fakeToken
-    });
-  } catch (e) {
-    console.error("Failed to add token:", e);
-    res.status(500).json({ 
-      error: "Failed to write token map",
-      code: "WRITE_ERROR"
-    });
-  }
-});
-
-app.delete("/admin/api/delete-token", (req, res) => {
-  const { fakeToken } = req.body;
-  
-  if (!fakeToken) {
-    return res.status(400).json({
-      error: "Missing fakeToken parameter",
-      code: "MISSING_PARAMETER"
-    });
-  }
-  
-  try {
-    const tokenMap = loadTokenMap();
-    
-    if (!tokenMap[fakeToken]) {
-      return res.status(404).json({
-        error: "Token not found",
-        code: "TOKEN_NOT_FOUND"
-      });
-    }
-    
-    delete tokenMap[fakeToken];
-    fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokenMap, null, 2), "utf8");
-    tokenMapCache = null; // Force reload
-    
-    logRequest({
-      type: "token_deleted",
-      ip: req.ip,
-      fakeToken,
-      userAgent: req.headers["user-agent"]
-    });
-    
-    res.json({
-      status: "ok",
-      message: "Token deleted successfully"
-    });
-  } catch (e) {
-    console.error("Failed to delete token:", e);
-    res.status(500).json({
-      error: "Failed to update token map",
-      code: "DELETE_ERROR"
-    });
-  }
-});
-
-// Webhook endpoint with enhanced security
-app.post("/viber/webhook/:uri", express.raw({ type: "*/*", limit: "50kb" }), async (req, res) => {
-  const uri = req.params.uri;
-  const signature = req.headers["x-viber-content-signature"];
-  
-  if (!signature) {
-    return res.status(400).json({ error: "Missing signature header" });
-  }
-  
-  const tokenMap = loadTokenMap();
-  const fakeToken = Object.keys(tokenMap).find(token => tokenMap[token].uri === uri);
-  
-  if (!fakeToken) {
-    logRequest({
-      type: "webhook_unknown_uri",
-      uri,
-      ip: req.ip,
-      userAgent: req.headers["user-agent"]
-    });
-    return res.status(404).json({ error: "Unknown URI" });
-  }
-
-  const realToken = tokenMap[fakeToken].real_token;
-  
-  // Verify signature
-  const computedSignature = crypto
-    .createHmac("sha256", realToken)
-    .update(req.body)
-    .digest("base64");
-    
-  if (signature !== computedSignature) {
-    logRequest({
-      type: "webhook_invalid_signature",
-      fakeToken,
-      uri,
-      ip: req.ip,
-      userAgent: req.headers["user-agent"]
-    });
-    return res.status(403).json({ error: "Invalid signature" });
-  }
-
-  let payload;
-  try {
-    payload = JSON.parse(req.body.toString());
-  } catch (err) {
-    logRequest({
-      type: "webhook_invalid_json",
-      fakeToken,
-      uri,
-      ip: req.ip,
-      error: err.message,
-      userAgent: req.headers["user-agent"]
-    });
-    return res.status(400).json({ error: "Invalid JSON payload" });
-  }
-
-  logRequest({
-    type: "webhook_received",
-    fakeToken,
-    uri,
-    ip: req.ip,
-    event: payload.event,
-    userAgent: req.headers["user-agent"]
-  });
-
-  // Forward to external endpoint if configured
-  const forwardUrl = tokenMap[fakeToken].forwardUrl;
-  if (forwardUrl) {
-    const maxRetries = 3;
-    let forwarded = false;
-    let lastError = null;
-
-    for (let attempt = 0; attempt < maxRetries && !forwarded; attempt++) {
-      try {
-        await axios.post(forwardUrl, payload, {
-          headers: {
-            "Content-Type": "application/json",
-            "X-Forwarded-For": req.ip,
-            "X-Fake-Token": fakeToken,
-            "X-Original-URI": uri,
-            "User-Agent": "ViberTokenGateway/2.0.0"
-          },
-          timeout: 8000,
-        });
-        forwarded = true;
-      } catch (err) {
-        lastError = err;
-        if (attempt < maxRetries - 1) {
-          await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt)));
-        }
-      }
-    }
-
-    if (!forwarded) {
-      logRequest({
-        type: "webhook_forward_failed",
-        fakeToken,
-        uri,
-        ip: req.ip,
-        error: lastError?.message || "Unknown error",
-        forwardUrl,
-        userAgent: req.headers["user-agent"]
-      });
-      
-      return res.status(500).json({ 
-        error: "Failed to forward webhook event",
-        code: "FORWARD_ERROR"
-      });
-    }
-  }
-
-  res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
-});
-
-// Admin UI route
-app.get("/admin", (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "admin.html"));
-});
-
-// 404 handler
-app.use("*", (req, res) => {
-  res.status(404).json({ 
-    error: "Endpoint not found",
-    code: "NOT_FOUND",
-    path: req.originalUrl
-  });
-});
-
-// Global error handler
-app.use((err, req, res, next) => {
-  console.error("Unhandled error:", err);
-  
-  logRequest({
-    type: "server_error",
-    ip: req.ip,
-    error: err.message,
-    stack: err.stack,
-    url: req.originalUrl,
-    userAgent: req.headers["user-agent"]
-  });
-  
-  res.status(500).json({
-    error: "Internal server error",
-    code: "INTERNAL_ERROR",
-    ...(NODE_ENV === "development" && { debug: err.message })
-  });
-});
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down gracefully');
-  if (tokenMapWatcher) {
-    tokenMapWatcher.close();
-  }
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  console.log('SIGINT received, shutting down gracefully');
-  if (tokenMapWatcher) {
-    tokenMapWatcher.close();
-  }
-  process.exit(0);
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Viber Token Gateway v2.0.0 running on port ${PORT}`);
-  console.log(`📊 Environment: ${NODE_ENV}`);
-  console.log(`🔧 Admin panel: http://localhost:${PORT}/admin`);
-  console.log(`💾 Token map: ${Object.keys(loadTokenMap()).length} tokens loaded`);
-});
+    // Recent activity (last 24 hours)
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const recentlyUsed = tokens.filter(([, profile]) => 
+      profile.las
